@@ -1,4 +1,4 @@
-use cosmic::iced::{Alignment, Task, font};
+use cosmic::iced::{Alignment, Length, Task, font};
 use cosmic::iced::window::{self, Id};
 use cosmic::iced::platform_specific::shell::wayland::commands::popup::{destroy_popup, get_popup};
 use cosmic::cosmic_config::{ConfigGet, ConfigSet};
@@ -373,9 +373,27 @@ impl cosmic::Application for AppModel {
             );
         }
         
-        let content = widget::row(row_children).spacing(0).align_y(Alignment::Center);
+        // Match native applets: the button must span the full panel width/height,
+        // otherwise only the text itself is clickable and receives hover effects.
+        let horizontal = self.core.applet.is_horizontal();
+        let suggested_padding = self.core.applet.suggested_padding(true);
+        let cross_size =
+            self.core.applet.suggested_size(true).1 + 2 * suggested_padding.1;
+
+        let mut content = widget::row(row_children).spacing(0).align_y(Alignment::Center);
+        content = if horizontal {
+            content.push(widget::space::vertical().height(Length::Fixed(cross_size as f32)))
+        } else {
+            content.push(widget::space::horizontal().width(Length::Fixed(cross_size as f32)))
+        };
+
         let main_btn = widget::button::custom(content)
-            .on_press(Message::TogglePopup)
+            .padding(if horizontal {
+                [0, suggested_padding.0]
+            } else {
+                [suggested_padding.0, 0]
+            })
+            .on_press_down(Message::TogglePopup)
             .class(cosmic::theme::Button::AppletIcon);
         
         widget::autosize::autosize(main_btn, widget::Id::unique()).into()

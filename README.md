@@ -111,6 +111,35 @@ This will:
 - Install app icon to `/usr/share/icons/hicolor/symbolic/apps/`
 - Install metainfo to `/usr/share/metainfo/`
 
+### Alternative: User-local install (no sudo)
+
+If you do not want to modify system directories, install everything into your
+home directory instead:
+
+```bash
+just install-user
+```
+
+This installs:
+- The binary to `~/.local/bin/cosmic-sys-monitor`
+- The desktop entry to `~/.local/share/applications/`
+- The icon and metainfo under `~/.local/share/`
+
+The recipe rewrites the desktop entry's `Exec=` line to the absolute path of
+the user-local binary, so no `PATH` changes are required. It then restarts the
+COSMIC panel so the applet picks up the new entry.
+
+This works without `sudo` because COSMIC resolves applets from XDG desktop
+entries, and entries in `~/.local/share/applications` take precedence over
+entries in `/usr/share/applications`. A user-local install therefore shadows a
+system-wide install without touching it.
+
+To remove a user-local install:
+
+```bash
+just uninstall-user
+```
+
 ### Step 3: Restart COSMIC Panel
 
 Log out and log back in, or restart the COSMIC panel:
@@ -186,10 +215,62 @@ just run
 just check
 ```
 
+### Testing a Local Build Without Installing System-wide
+
+`cosmic-panel` resolves applet executables through XDG desktop entries. Placing
+an entry with the same filename in `~/.local/share/applications` shadows the
+system entry in `/usr/share/applications`, so the panel will launch your local
+build instead:
+
+```bash
+just install-user
+```
+
+The panel also watches its user config at
+`~/.config/cosmic/com.system76.CosmicPanel.Panel/v1/plugins_center`. Changing
+that list makes the panel recreate the panel space and respawn its applets.
+You can therefore reload the applet without restarting the panel or logging
+out, by either:
+
+- removing and re-adding the applet in **Settings → Desktop → Panel**, or
+- briefly toggling the applet list in `plugins_center` (advanced; back up the
+  file first and preserve any other applet entries).
+
+For example, temporarily replace the contents of `plugins_center` with:
+
+```ron
+Some([])
+```
+
+then restore the original list (for example):
+
+```ron
+Some([
+    "io.github.marcos.SysMonitor",
+])
+```
+
+Verify which binary the panel actually launched with:
+
+```bash
+readlink /proc/$(pgrep -n cosmic-sys-monitor)/exe
+```
+
+None of this requires `sudo` or a session restart. Only a system-wide install
+under `/usr` needs root.
+
 ## Uninstallation
+
+System-wide install:
 
 ```bash
 sudo just uninstall
+```
+
+User-local install:
+
+```bash
+just uninstall-user
 ```
 
 ## License

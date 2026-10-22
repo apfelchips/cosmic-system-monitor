@@ -15,6 +15,15 @@ use std::sync::LazyLock;
 use nvml_wrapper::enum_wrappers::device::TemperatureSensor;
 static NVML: LazyLock<Result<nvml_wrapper::Nvml, nvml_wrapper::error::NvmlError>> = LazyLock::new(nvml_wrapper::Nvml::init);
 
+// Selectable refresh intervals (label, milliseconds).
+const INTERVAL_OPTIONS: [(&str, u64); 5] = [
+    ("1 s", 1_000),
+    ("2 s", 2_000),
+    ("5 s", 5_000),
+    ("10 s", 10_000),
+    ("30 s", 30_000),
+];
+
 // GPU temperature via NVML
 fn get_nvidia_temp() -> Option<f32> {
     if let Ok(nvml) = &*NVML {
@@ -69,7 +78,10 @@ pub enum Message {
     ToggleGpuTemp,
     ToggleGpuVram,
     ToggleDisk,
+    ToggleDiskAbs,
     ToggleNet,
+    ResetDefaults,
+    SetInterval(u64),
 }
 
 impl cosmic::Application for AppModel {
@@ -84,7 +96,11 @@ impl cosmic::Application for AppModel {
     fn init(core: cosmic::Core, _flags: Self::Flags) -> (Self, Task<cosmic::Action<Self::Message>>) {
         let config_handler = cosmic::cosmic_config::Config::new(Self::APP_ID, Config::VERSION)
             .unwrap_or_else(|_| cosmic::cosmic_config::Config::new(Self::APP_ID, 0).unwrap());
-        let config = config_handler.get("config").unwrap_or_default();
+        let mut config: Config = config_handler.get("config").unwrap_or_default();
+        if !config.any_visible() {
+            // A config with everything hidden leaves the applet unclickable.
+            config.show_cpu = true;
+        }
 
         let mut system = System::new_with_specifics(
             RefreshKind::nothing()
@@ -205,8 +221,9 @@ impl cosmic::Application for AppModel {
                 }
                 Task::none()
             }
-            Message::ToggleCpu | Message::ToggleCpuTemp | Message::ToggleRam | Message::ToggleRamAbs | Message::ToggleGpu | Message::ToggleGpuTemp | Message::ToggleGpuVram | Message::ToggleDisk | Message::ToggleNet => {
-                match message {
+            Message::ToggleCpu | Message::ToggleCpuTemp | Message::ToggleRam | Message::ToggleRamAbs | Message::ToggleGpu | Message::ToggleGpuTemp | Message::ToggleGpuVram | Message::ToggleDisk | Message::ToggleDiskAbs | Message::ToggleNet => {
+                let previous = self.config;
+                match &message {
                     Message::ToggleCpu => self.config.show_cpu = !self.config.show_cpu,
                     Message::ToggleCpuTemp => self.config.show_cpu_temp = !self.config.show_cpu_temp,
                     Message::ToggleRam => self.config.show_ram = !self.config.show_ram,
@@ -215,9 +232,25 @@ impl cosmic::Application for AppModel {
                     Message::ToggleGpuTemp => self.config.show_gpu_temp = !self.config.show_gpu_temp,
                     Message::ToggleGpuVram => self.config.show_gpu_vram = !self.config.show_gpu_vram,
                     Message::ToggleDisk => self.config.show_disk = !self.config.show_disk,
+                    Message::ToggleDiskAbs => self.config.show_disk_abs = !self.config.show_disk_abs,
                     Message::ToggleNet => self.config.show_net = !self.config.show_net,
                     _ => {}
                 }
+                // Keep at least one metric enabled so the applet stays clickable
+                // and the settings popup remains reachable.
+                if !self.config.any_visible() {
+                    self.config = previous;
+                }
+                let _ = self.config_handler.set("config", &self.config);
+                Task::none()
+            }
+            Message::ResetDefaults => {
+                self.config = Config::default();
+                let _ = self.config_handler.set("config", &self.config);
+                Task::none()
+            }
+            Message::SetInterval(ms) => {
+                self.config.update_interval_ms = ms;
                 let _ = self.config_handler.set("config", &self.config);
                 Task::none()
             }
@@ -228,6 +261,7 @@ impl cosmic::Application for AppModel {
         let text_size = 11;
         let label_font = font::Font { weight: font::Weight::Bold, ..font::Font::MONOSPACE };
         let value_font = font::Font::MONOSPACE;
+        let dim_font = font::Font { weight: font::Weight::Light, ..font::Font::MONOSPACE };
         let config = &self.config;
         
         let mut row_children: Vec<Element<'_, Message>> = Vec::new();
@@ -291,26 +325,38 @@ impl cosmic::Application for AppModel {
         }
         
         if config.show_disk {
-            let disk_info = {
-                let mut disk_str = String::new();
-                for d in &self.disks {
-                    let mount = d.mount_point().to_string_lossy().to_string();
-                    if mount == "/" || mount.starts_with("/home") {
-                        let total = d.total_space() / 1024 / 1024 / 1024;
-                        let available = d.available_space() / 1024 / 1024 / 1024;
-                        let used = total - available;
-                        let usage = if total > 0 { (used as f32 / total as f32) * 100.0 } else { 0.0 };
-                        disk_str = format!("{:.0}%| {}/{} GB", usage, used, total);
-                        break;
+            let mut disk_children: Vec<Element<'_, Message>> = vec![
+                widget::text("DISK ").size(text_size).font(label_font).into(),
+            ];
+            let disk = self.disks.iter().find(|d| {
+                let mount = d.mount_point().to_string_lossy();
+                mount.as_ref() == "/" || mount.starts_with("/home")
+            });
+            match disk {
+                Some(d) => {
+                    let total = d.total_space() / 1024 / 1024 / 1024;
+                    let available = d.available_space() / 1024 / 1024 / 1024;
+                    let used = total - available;
+                    let usage = if total > 0 { (used as f32 / total as f32) * 100.0 } else { 0.0 };
+                    disk_children.push(
+                        widget::text(format!("{:.0}%", usage))
+                            .size(text_size).font(value_font).into()
+                    );
+                    if config.show_disk_abs {
+                        disk_children.push(
+                            widget::text(format!("|{}/{} GB", used, total))
+                                .size(text_size).font(value_font).into()
+                        );
                     }
                 }
-                if disk_str.is_empty() { "N/A".to_string() } else { disk_str }
-            };
+                None => {
+                    disk_children.push(
+                        widget::text("N/A").size(text_size).font(value_font).into()
+                    );
+                }
+            }
             row_children.push(
-                widget::row(vec![
-                    widget::text("DISK ").size(text_size).font(label_font).into(),
-                    widget::text(disk_info).size(text_size).font(value_font).into(),
-                ]).spacing(0).align_y(Alignment::Center).into()
+                widget::row(disk_children).spacing(0).align_y(Alignment::Center).into()
             );
             row_children.push(widget::text(" | ").size(text_size).font(value_font).into());
         }
@@ -319,10 +365,10 @@ impl cosmic::Application for AppModel {
             row_children.push(
                 widget::row(vec![
                     widget::text("NET ").size(text_size).font(label_font).into(),
-                    widget::text("dl ").size(text_size - 1).font(value_font).into(),
-                    widget::text(self.download_speed.as_str()).size(text_size).font(value_font).into(),
-                    widget::text(" up ").size(text_size - 1).font(value_font).into(),
+                    widget::text("up ").size(text_size).font(dim_font).into(),
                     widget::text(self.upload_speed.as_str()).size(text_size).font(value_font).into(),
+                    widget::text(" dl ").size(text_size).font(dim_font).into(),
+                    widget::text(self.download_speed.as_str()).size(text_size).font(value_font).into(),
                 ]).spacing(0).align_y(Alignment::Center).into()
             );
         }
@@ -384,11 +430,36 @@ impl cosmic::Application for AppModel {
             widget::toggler(config.show_disk).on_toggle(move |_| Message::ToggleDisk).into(),
         ]).spacing(8);
         
+        let disk_abs_row = widget::row(vec![
+            widget::text("  Disk Abs").size(13).into(),
+            widget::toggler(config.show_disk_abs).on_toggle(move |_| Message::ToggleDiskAbs).into(),
+        ]).spacing(8);
+        
         let net_row = widget::row(vec![
             widget::text("NET").size(13).into(),
             widget::toggler(config.show_net).on_toggle(move |_| Message::ToggleNet).into(),
         ]).spacing(8);
         
+        let interval_selected = INTERVAL_OPTIONS
+            .iter()
+            .position(|(_, ms)| *ms == config.update_interval_ms);
+        let interval_row = widget::row(vec![
+            widget::text("Interval").size(13).into(),
+            widget::dropdown(
+                INTERVAL_OPTIONS.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
+                interval_selected,
+                |index| Message::SetInterval(INTERVAL_OPTIONS[index].1),
+            )
+            .into(),
+        ]).spacing(8);
+
+        let reset_row = widget::row(vec![
+            widget::button::standard("Reset to Defaults")
+                .on_press(Message::ResetDefaults)
+                .into(),
+            widget::space().into(),
+        ]);
+
         let content = widget::column(vec![
             header.into(),
             cpu_row.into(),
@@ -399,7 +470,10 @@ impl cosmic::Application for AppModel {
             gpu_temp_row.into(),
             gpu_vram_row.into(),
             disk_row.into(),
+            disk_abs_row.into(),
             net_row.into(),
+            interval_row.into(),
+            reset_row.into(),
         ])
             .spacing(12)
             .padding(16);

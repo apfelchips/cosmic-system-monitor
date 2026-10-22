@@ -28,10 +28,11 @@ run *args:
     env RUST_BACKTRACE=full cargo run --release {{args}}
 
 install: build-release
-    install -Dm0755 {{ cargo-target-dir / 'release' / name }} {{bin-dst}}
-    install -Dm0644 resources/app.desktop {{desktop-dst}}
-    install -Dm0644 resources/app.metainfo.xml {{metainfo-dst}}
-    install -Dm0644 resources/icon-symbolic.svg {{icon-dst}}
+    sudo install -Dm0755 {{ cargo-target-dir / 'release' / name }} {{bin-dst}}
+    sudo install -Dm0644 resources/app.desktop {{desktop-dst}}
+    sudo install -Dm0644 resources/app.metainfo.xml {{metainfo-dst}}
+    sudo install -Dm0644 resources/icon-symbolic.svg {{icon-dst}}
+    killall -9 cosmic-panel
 
 uninstall:
-    rm -f {{bin-dst}} {{desktop-dst}} {{icon-dst}} {{metainfo-dst}}
+    sudo rm -f {{bin-dst}} {{desktop-dst}} {{icon-dst}} {{metainfo-dst}} && killall -9 cosmic-panel

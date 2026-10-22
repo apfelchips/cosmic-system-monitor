@@ -6,16 +6,16 @@ use cosmic::prelude::*;
 use cosmic::widget;
 use sysinfo::{System, CpuRefreshKind, RefreshKind, MemoryRefreshKind, Networks, Components, Disks};
 use crate::config::Config;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use cosmic::iced::time;
 use std::fs;
 use std::sync::LazyLock;
 
-// NVML para NVIDIA
+// NVML for NVIDIA
 use nvml_wrapper::enum_wrappers::device::TemperatureSensor;
 static NVML: LazyLock<Result<nvml_wrapper::Nvml, nvml_wrapper::error::NvmlError>> = LazyLock::new(nvml_wrapper::Nvml::init);
 
-// Temperatura GPU via NVML
+// GPU temperature via NVML
 fn get_nvidia_temp() -> Option<f32> {
     if let Ok(nvml) = &*NVML {
         if let Some(pci_slot) = get_nvidia_pci_slot() {
@@ -53,6 +53,7 @@ pub struct AppModel {
     gpu_vram_total: u64,
     download_speed: String,
     upload_speed: String,
+    last_net_refresh: Instant,
 }
 
 #[derive(Clone, Debug)]
@@ -63,6 +64,7 @@ pub enum Message {
     ToggleCpu,
     ToggleCpuTemp,
     ToggleRam,
+    ToggleRamAbs,
     ToggleGpu,
     ToggleGpuTemp,
     ToggleGpuVram,
@@ -111,8 +113,9 @@ impl cosmic::Application for AppModel {
             gpu_temp: 0.0,
             gpu_vram_used: 0,
             gpu_vram_total: 0,
-            download_speed: "0 B/s".to_string(),
-            upload_speed: "0 B/s".to_string(),
+            download_speed: format_speed(0.0),
+            upload_speed: format_speed(0.0),
+            last_net_refresh: Instant::now(),
         };
 
         (app, Task::none())
@@ -164,15 +167,18 @@ impl cosmic::Application for AppModel {
                     }
                 }
 
-                let mut total_down = 0;
-                let mut total_up = 0;
+                let elapsed = self.last_net_refresh.elapsed().as_secs_f64().max(0.001);
+                self.last_net_refresh = Instant::now();
+
+                let mut bytes_down = 0;
+                let mut bytes_up = 0;
                 for (_, data) in &self.networks {
-                    total_down += data.received();
-                    total_up += data.transmitted();
+                    bytes_down += data.received();
+                    bytes_up += data.transmitted();
                 }
-                
-                self.download_speed = format_speed(total_down);
-                self.upload_speed = format_speed(total_up);
+
+                self.download_speed = format_speed(bytes_down as f64 / elapsed);
+                self.upload_speed = format_speed(bytes_up as f64 / elapsed);
                 
                 Task::none()
             }
@@ -199,11 +205,12 @@ impl cosmic::Application for AppModel {
                 }
                 Task::none()
             }
-            Message::ToggleCpu | Message::ToggleCpuTemp | Message::ToggleRam | Message::ToggleGpu | Message::ToggleGpuTemp | Message::ToggleGpuVram | Message::ToggleDisk | Message::ToggleNet => {
+            Message::ToggleCpu | Message::ToggleCpuTemp | Message::ToggleRam | Message::ToggleRamAbs | Message::ToggleGpu | Message::ToggleGpuTemp | Message::ToggleGpuVram | Message::ToggleDisk | Message::ToggleNet => {
                 match message {
                     Message::ToggleCpu => self.config.show_cpu = !self.config.show_cpu,
                     Message::ToggleCpuTemp => self.config.show_cpu_temp = !self.config.show_cpu_temp,
                     Message::ToggleRam => self.config.show_ram = !self.config.show_ram,
+                    Message::ToggleRamAbs => self.config.show_ram_abs = !self.config.show_ram_abs,
                     Message::ToggleGpu => self.config.show_gpu = !self.config.show_gpu,
                     Message::ToggleGpuTemp => self.config.show_gpu_temp = !self.config.show_gpu_temp,
                     Message::ToggleGpuVram => self.config.show_gpu_vram = !self.config.show_gpu_vram,
@@ -218,42 +225,45 @@ impl cosmic::Application for AppModel {
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
-        let text_size = 12;
-        let bold_font = font::Font { weight: font::Weight::Bold, ..Default::default() };
+        let text_size = 11;
+        let label_font = font::Font { weight: font::Weight::Bold, ..font::Font::MONOSPACE };
+        let value_font = font::Font::MONOSPACE;
         let config = &self.config;
         
         let mut row_children: Vec<Element<'_, Message>> = Vec::new();
         
         if config.show_cpu {
             let cpu_info = if config.show_cpu_temp {
-                format!("{:.0}%|{:.0}°C", self.cpu_usage, self.cpu_temp)
+                format!("{:>2.0}%|{:.0}°C", self.cpu_usage, self.cpu_temp)
             } else {
-                format!("{:.0}%", self.cpu_usage)
+                format!("{:>2.0}%", self.cpu_usage)
             };
             row_children.push(
                 widget::row(vec![
-                    widget::text("CPU ").size(text_size).font(bold_font).into(),
-                    widget::text(cpu_info).size(text_size).into(),
+                    widget::text("CPU ").size(text_size).font(label_font).into(),
+                    widget::text(cpu_info).size(text_size).font(value_font).into(),
                 ]).spacing(0).align_y(Alignment::Center).into()
             );
-            row_children.push(widget::text(" | ").size(text_size).into());
+            row_children.push(widget::text(" | ").size(text_size).font(value_font).into());
         }
         
         if config.show_ram {
-            let ram_info = if self.system.total_memory() > 0 {
-                let used_gb = self.system.used_memory() as f64 / 1024.0 / 1024.0;
-                let total_gb = self.system.total_memory() as f64 / 1024.0 / 1024.0;
-                format!("{:.0}% | {:.1}/{:.1} GB", self.ram_usage, used_gb, total_gb)
-            } else {
-                format!("{:.0}%", self.ram_usage)
-            };
+            let mut ram_children: Vec<Element<'_, Message>> = vec![
+                widget::text("RAM ").size(text_size).font(label_font).into(),
+                widget::text(format!("{:>2.0}%", self.ram_usage)).size(text_size).font(value_font).into(),
+            ];
+            if config.show_ram_abs && self.system.total_memory() > 0 {
+                let used_gb = self.system.used_memory() as f64 / 1024.0 / 1024.0 / 1024.0;
+                let total_gb = self.system.total_memory() as f64 / 1024.0 / 1024.0 / 1024.0;
+                ram_children.push(
+                    widget::text(format!("|{:.1}/{:.1} GB", used_gb, total_gb))
+                        .size(text_size).font(value_font).into()
+                );
+            }
             row_children.push(
-                widget::row(vec![
-                    widget::text("Ram ").size(text_size).font(bold_font).into(),
-                    widget::text(ram_info).size(text_size).into(),
-                ]).spacing(0).align_y(Alignment::Center).into()
+                widget::row(ram_children).spacing(0).align_y(Alignment::Center).into()
             );
-            row_children.push(widget::text(" | ").size(text_size).into());
+            row_children.push(widget::text(" | ").size(text_size).font(value_font).into());
         }
         
         if config.show_gpu {
@@ -263,8 +273,8 @@ impl cosmic::Application for AppModel {
                     info = format!("{} |{:.0}°C", info, self.gpu_temp);
                 }
                 if config.show_gpu_vram && self.gpu_vram_total > 0 {
-                    let used = self.gpu_vram_used / 1024 / 1024;
-                    let total = self.gpu_vram_total / 1024 / 1024;
+                    let used = self.gpu_vram_used / 1024 / 1024 / 1024;
+                    let total = self.gpu_vram_total / 1024 / 1024 / 1024;
                     info = format!("{}|{}/{}GB", info, used, total);
                 }
                 info
@@ -273,11 +283,11 @@ impl cosmic::Application for AppModel {
             };
             row_children.push(
                 widget::row(vec![
-                    widget::text("GPU ").size(text_size).font(bold_font).into(),
-                    widget::text(gpu_info).size(text_size).into(),
+                    widget::text("GPU ").size(text_size).font(label_font).into(),
+                    widget::text(gpu_info).size(text_size).font(value_font).into(),
                 ]).spacing(0).align_y(Alignment::Center).into()
             );
-            row_children.push(widget::text(" | ").size(text_size).into());
+            row_children.push(widget::text(" | ").size(text_size).font(value_font).into());
         }
         
         if config.show_disk {
@@ -298,19 +308,21 @@ impl cosmic::Application for AppModel {
             };
             row_children.push(
                 widget::row(vec![
-                    widget::text("DISK ").size(text_size).font(bold_font).into(),
-                    widget::text(disk_info).size(text_size).into(),
+                    widget::text("DISK ").size(text_size).font(label_font).into(),
+                    widget::text(disk_info).size(text_size).font(value_font).into(),
                 ]).spacing(0).align_y(Alignment::Center).into()
             );
-            row_children.push(widget::text(" | ").size(text_size).into());
+            row_children.push(widget::text(" | ").size(text_size).font(value_font).into());
         }
         
         if config.show_net {
-            let net_info = format!("↓{} ↑{}", self.download_speed, self.upload_speed);
             row_children.push(
                 widget::row(vec![
-                    widget::text("NET ").size(text_size).font(bold_font).into(),
-                    widget::text(net_info).size(text_size).into(),
+                    widget::text("NET ").size(text_size).font(label_font).into(),
+                    widget::text("dl ").size(text_size - 1).font(value_font).into(),
+                    widget::text(self.download_speed.as_str()).size(text_size).font(value_font).into(),
+                    widget::text(" up ").size(text_size - 1).font(value_font).into(),
+                    widget::text(self.upload_speed.as_str()).size(text_size).font(value_font).into(),
                 ]).spacing(0).align_y(Alignment::Center).into()
             );
         }
@@ -328,7 +340,7 @@ impl cosmic::Application for AppModel {
         let bold_font = font::Font { weight: font::Weight::Bold, ..Default::default() };
         
         let header = widget::row(vec![
-            widget::text("Configurações").size(16).font(bold_font).into(),
+            widget::text("Settings").size(16).font(bold_font).into(),
             widget::space().into(),
         ]);
         
@@ -345,6 +357,11 @@ impl cosmic::Application for AppModel {
         let ram_row = widget::row(vec![
             widget::text("RAM").size(13).into(),
             widget::toggler(config.show_ram).on_toggle(move |_| Message::ToggleRam).into(),
+        ]).spacing(8);
+        
+        let ram_abs_row = widget::row(vec![
+            widget::text("  RAM Abs").size(13).into(),
+            widget::toggler(config.show_ram_abs).on_toggle(move |_| Message::ToggleRamAbs).into(),
         ]).spacing(8);
         
         let gpu_row = widget::row(vec![
@@ -368,7 +385,7 @@ impl cosmic::Application for AppModel {
         ]).spacing(8);
         
         let net_row = widget::row(vec![
-            widget::text("Net").size(13).into(),
+            widget::text("NET").size(13).into(),
             widget::toggler(config.show_net).on_toggle(move |_| Message::ToggleNet).into(),
         ]).spacing(8);
         
@@ -377,6 +394,7 @@ impl cosmic::Application for AppModel {
             cpu_row.into(),
             cpu_temp_row.into(),
             ram_row.into(),
+            ram_abs_row.into(),
             gpu_row.into(),
             gpu_temp_row.into(),
             gpu_vram_row.into(),
@@ -394,14 +412,31 @@ impl cosmic::Application for AppModel {
     }
 }
 
-fn format_speed(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{} B/s", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KB/s", bytes as f64 / 1024.0)
-    } else {
-        format!("{:.1} MB/s", bytes as f64 / 1024.0 / 1024.0)
+fn format_speed(bytes_per_sec: f64) -> String {
+    const STEP: f64 = 1000.0;
+    // Anything at or above this rounds to "100.0", which would need a 3rd digit.
+    // We switch to the next unit instead, rounding up.
+    const MAX_VALUE: f64 = 99.95;
+    const UNITS: [&str; 3] = ["KB/s", "MB/s", "GB/s"];
+
+    // KB/s is the smallest unit shown, so any lower rate appears as a fraction,
+    // e.g. 500 B/s -> "  0.5 KB/s".
+    let mut value = bytes_per_sec / STEP;
+    let mut unit = 0;
+    while value >= MAX_VALUE && unit < UNITS.len() - 1 {
+        value /= STEP;
+        unit += 1;
     }
+
+    // Any actual traffic shows at least "0.1 KB/s" instead of rounding to "0.0".
+    if bytes_per_sec > 0.0 && value < 0.05 {
+        value = 0.1;
+    }
+
+    // Fixed width: "99.9" for the value and 4 columns for the unit,
+    // so the applet never resizes when the unit or magnitude changes.
+    let unit = UNITS[unit];
+    format!("{value:>4.1} {unit:<4}")
 }
 
 fn read_gpu_usage() -> Option<f32> {
